@@ -18,7 +18,7 @@ with st.sidebar:
     api_key = st.text_input("Ta clé API Google (AI Studio)", type="password")
     
     # On garde Flash, c'est le meilleur ratio vitesse/gratuit
-    model_name = "gemini-1.5-flash"
+     model_name = "gemini-1.5-pro-002"
 
 if api_key:
     try:
