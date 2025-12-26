@@ -4,12 +4,12 @@ import pandas as pd
 import json
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="GEO Tracker (Mode Grounding)", layout="wide")
+st.set_page_config(page_title="GEO Tracker (Mode Robuste)", layout="wide")
 
-st.title("🌍 GEO Analytics Tracker (avec Google Search)")
+st.title("🛡️ GEO Analytics Tracker (Mode Robuste)")
 st.markdown("""
-**Moteur :** Gemini 1.5 Flash + **Google Search Grounding**.
-**Ce qui change :** L'IA va chercher sur le vrai web pour répondre. On peut donc voir **QUELS SITES** te citent.
+**Statut :** Ce tracker est équipé d'un "Filet de sécurité". 
+Il tente d'abord la recherche Google réelle. Si l'API échoue, il bascule sur l'analyse IA standard.
 """)
 
 # --- SIDEBAR ---
@@ -17,8 +17,8 @@ with st.sidebar:
     st.header("Paramètres")
     api_key = st.text_input("Ta clé API Google (AI Studio)", type="password")
     
-    # On garde Flash, c'est le meilleur ratio vitesse/gratuit
-     model_name = "gemini-1.5-pro-002"
+    # On utilise le nom de modèle le plus standard
+    model_name = "gemini-1.5-flash"
 
 if api_key:
     try:
@@ -42,63 +42,57 @@ input_questions = st.text_area(
     value="Quelle est la meilleure chaussure de running ?\nTop 3 marques de sport pour le marathon"
 )
 
-start_btn = st.button("Lancer l'Audit GEO (Live Web)", type="primary")
+start_btn = st.button("Lancer l'Audit", type="primary")
 
-# --- FONCTIONS INTELLIGENTES ---
+# --- FONCTIONS INTELLIGENTES (AVEC FILET DE SECURITÉ) ---
 
-def get_gemini_search_response(question):
+def get_smart_response(question):
     """
-    SIMULATEUR : Utilise l'outil Google Search pour répondre avec des faits réels.
+    Tente la recherche Google. Si ça plante (404), bascule en mode standard.
     """
+    # TENTATIVE 1 : Mode Recherche (Grounding)
     try:
-        # On active l'outil de recherche Google (Grounding)
         tools = 'google_search_retrieval'
-        model = genai.GenerativeModel(model_name, tools=tools)
+        # On spécifie explicitement la version 'models/' pour aider l'API
+        model = genai.GenerativeModel(f'models/{model_name}', tools=tools)
         
-        # On force l'IA à explicitement montrer ses sources dans le texte
         prompt = f"""
-        Agis comme un moteur de recherche IA avancé.
         Question : {question}
-        
-        Consignes :
-        1. Fais une recherche Google pour trouver des informations récentes.
-        2. Réponds à la question de manière utile pour l'utilisateur.
-        3. IMPORTANT : À la fin, liste explicitement les URL des sources que tu as utilisées.
+        Fais une recherche Google récente. Réponds et liste tes sources URL à la fin.
         """
         response = model.generate_content(prompt)
-        return response.text
+        return response.text, "Recherche Web 🌍"
+        
     except Exception as e:
-        return f"Erreur Grounding : {e}"
+        # TENTATIVE 2 : Mode Fallback (Standard)
+        # Si le mode recherche échoue, on passe ici silencieusement
+        try:
+            model_fallback = genai.GenerativeModel(f'models/{model_name}') # Pas de tools
+            prompt_fallback = f"Tu es un expert. Réponds à cette question : {question}"
+            response = model_fallback.generate_content(prompt_fallback)
+            return response.text, "IA Standard 🤖 (Backup)"
+        except Exception as e2:
+            return f"Erreur critique : {e2}", "Erreur ❌"
 
-def analyze_response_with_sources(llm_answer, brand):
-    """
-    JUGE : Analyse le texte pour trouver la marque ET les sources (URL)
-    """
-    generation_config = {"response_mime_type": "application/json"}
-    model_judge = genai.GenerativeModel(model_name, generation_config=generation_config)
+def analyze_content(text, brand):
+    """Extrait les données (JSON)"""
+    model_judge = genai.GenerativeModel(f'models/{model_name}', generation_config={"response_mime_type": "application/json"})
     
     prompt = f"""
-    Tu es un analyste de données. Analyse la réponse IA ci-dessous.
-    
-    Marque cible : "{brand}"
-    
-    Réponds avec ce JSON exact :
+    Analyse ce texte pour la marque "{brand}".
+    Réponds en JSON :
     {{
-        "cited": boolean, (La marque est-elle citée ?)
-        "sentiment": string, (Positif/Neutre/Négatif)
-        "sources_urls": list of strings, (Extrais toutes les URLs ou noms de domaine cités dans le texte qui recommandent ou parlent du sujet)
-        "rank_impression": integer
+        "cited": boolean,
+        "sentiment": string,
+        "sources_detected": string (Liste les domaines ou 'Aucune source' si absent)
     }}
-    
-    Texte à analyser :
-    \"\"\"{llm_answer}\"\"\"
+    Texte : \"\"\"{text}\"\"\"
     """
-    
     try:
-        response = model_judge.generate_content(prompt)
-        return json.loads(response.text)
-    except Exception as e:
-        return {"cited": False, "sentiment": "Error", "sources_urls": [], "rank_impression": 0}
+        res = model_judge.generate_content(prompt)
+        return json.loads(res.text)
+    except:
+        return {"cited": False, "sentiment": "Erreur", "sources_detected": "N/A"}
 
 # --- MAIN LOOP ---
 
@@ -107,49 +101,34 @@ if start_btn:
     results = []
     
     progress_bar = st.progress(0)
-    st_status = st.status("Recherche Google en cours...", expanded=True)
+    status_box = st.empty() # Zone de texte dynamique
     
     for i, question in enumerate(questions_list):
-        st_status.write(f"🌍 Recherche pour : {question}")
+        status_box.info(f"Traitement : {question}...")
         
-        # 1. Appel avec Grounding (Recherche Web réelle)
-        llm_text = get_gemini_search_response(question)
+        # 1. Récupération intelligente
+        answer_text, source_mode = get_smart_response(question)
         
         # 2. Analyse
-        analysis = analyze_response_with_sources(llm_text, target_brand)
-        
-        # Nettoyage des sources pour l'affichage (on garde juste les domaines parfois c'est plus propre)
-        sources_clean = ", ".join(analysis.get('sources_urls', [])[:3]) # On garde les 3 premières
+        data = analyze_content(answer_text, target_brand)
         
         row = {
             "Question": question,
-            "Présence": "✅" if analysis.get('cited') else "❌",
-            "Sources (Influenceurs)": sources_clean, # NOUVEAU
-            "Sentiment": analysis.get('sentiment'),
-            "Réponse Complète": llm_text 
+            "Mode": source_mode, # On affiche si on a réussi à utiliser Google ou non
+            "Présence": "✅" if data.get('cited') else "❌",
+            "Sources": data.get('sources_detected', 'N/A'),
+            "Réponse": answer_text
         }
         results.append(row)
         progress_bar.progress((i + 1) / len(questions_list))
 
-    st_status.update(label="Audit Terminé !", state="complete", expanded=False)
+    status_box.success("Terminé !")
 
     # --- RESULTS ---
     st.divider()
     if results:
         df = pd.DataFrame(results)
+        st.dataframe(df[["Question", "Mode", "Présence", "Sources"]], use_container_width=True)
         
-        # Affichage du tableau
-        st.subheader("Résultats avec Sources Identifiées")
-        st.dataframe(
-            df[["Question", "Présence", "Sentiment", "Sources (Influenceurs)"]], 
-            use_container_width=True
-        )
-        
-        # Petit tuto d'interprétation
-        st.info("💡 **Astuce GEO :** La colonne 'Sources' te montre les sites que l'IA a lus pour construire sa réponse. Si tu veux être cité par l'IA, tu dois obtenir des articles ou des liens sur ces sites précis (C'est ça, le GEO !).")
-
-        with st.expander("Voir les réponses complètes"):
-            for r in results:
-                st.markdown(f"**Q: {r['Question']}**")
-                st.markdown(r['Réponse Complète'])
-                st.divider()
+        with st.expander("Voir les détails"):
+            st.table(df)
