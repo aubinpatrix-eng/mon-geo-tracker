@@ -17,12 +17,13 @@ with st.sidebar:
     st.header("Paramètres")
     api_key = st.text_input("Ta clé API Google (AI Studio)", type="password")
     
-    # LISTE DE SECOURS : L'outil va tester ces modèles un par un
+   # LISTE DE SECOURS (Mise à jour avec Gemini 3 Flash ?)
     available_models = [
-        "gemini-1.5-flash-latest", # Le plus récent
-        "gemini-1.5-flash",        # L'alias standard
-        "gemini-1.5-flash-001",    # La version spécifique (souvent plus stable)
-        "gemini-pro"               # La vieille version (marche toujours)
+        "gemini-2.0-flash-exp",     # Le plus probable pour "Fast/Flash récent"
+        "gemini-exp-1206",          # Un autre nom de code récent très rapide
+        "gemini-1.5-flash",         # La valeur sûre
+        "gemini-1.5-flash-8b",      # Une version ultra-légère parfois dispo
+        "gemini-1.5-pro"            # Le backup puissant
     ]
     
     st.caption(f"Modèles qui seront testés : {', '.join(available_models)}")
