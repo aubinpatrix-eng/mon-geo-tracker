@@ -2,14 +2,14 @@ import streamlit as st
 import google.generativeai as genai
 import pandas as pd
 import json
+import time
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="GEO Tracker (Mode Robuste)", layout="wide")
+st.set_page_config(page_title="GEO Tracker (Mode Auto-Fix)", layout="wide")
 
-st.title("🛡️ GEO Analytics Tracker (Mode Robuste)")
+st.title("🔧 GEO Analytics Tracker (Mode Auto-Fix)")
 st.markdown("""
-**Statut :** Ce tracker est équipé d'un "Filet de sécurité". 
-Il tente d'abord la recherche Google réelle. Si l'API échoue, il bascule sur l'analyse IA standard.
+**Statut :** Ce script teste automatiquement plusieurs versions de Gemini pour contourner les erreurs 404.
 """)
 
 # --- SIDEBAR ---
@@ -17,15 +17,18 @@ with st.sidebar:
     st.header("Paramètres")
     api_key = st.text_input("Ta clé API Google (AI Studio)", type="password")
     
-    # On utilise le nom de modèle le plus standard
-    model_name = "gemini-1.5-flash"
+    # LISTE DE SECOURS : L'outil va tester ces modèles un par un
+    available_models = [
+        "gemini-1.5-flash-latest", # Le plus récent
+        "gemini-1.5-flash",        # L'alias standard
+        "gemini-1.5-flash-001",    # La version spécifique (souvent plus stable)
+        "gemini-pro"               # La vieille version (marche toujours)
+    ]
+    
+    st.caption(f"Modèles qui seront testés : {', '.join(available_models)}")
 
 if api_key:
-    try:
-        genai.configure(api_key=api_key)
-    except Exception as e:
-        st.error(f"Erreur clé API : {e}")
-        st.stop()
+    genai.configure(api_key=api_key)
 else:
     st.warning("Entre ta clé API Google pour commencer.")
     st.stop()
@@ -44,39 +47,60 @@ input_questions = st.text_area(
 
 start_btn = st.button("Lancer l'Audit", type="primary")
 
-# --- FONCTIONS INTELLIGENTES (AVEC FILET DE SECURITÉ) ---
+# --- FONCTIONS INTELLIGENTES (AVEC ROTATION DE MODÈLES) ---
+
+def try_generate_content(prompt, tools=None):
+    """
+    Cette fonction essaie tous les modèles de la liste jusqu'à ce qu'un fonctionne.
+    """
+    last_error = ""
+    
+    for model_name in available_models:
+        try:
+            # On tente de configurer le modèle
+            if tools:
+                model = genai.GenerativeModel(model_name, tools=tools)
+            else:
+                model = genai.GenerativeModel(model_name)
+                
+            # On lance la génération
+            response = model.generate_content(prompt)
+            
+            # Si on arrive ici, c'est que ça a marché !
+            return response.text, model_name 
+            
+        except Exception as e:
+            # Si ça plante, on note l'erreur et on passe au modèle suivant dans la boucle
+            last_error = str(e)
+            continue
+            
+    # Si tout a échoué
+    return None, last_error
 
 def get_smart_response(question):
-    """
-    Tente la recherche Google. Si ça plante (404), bascule en mode standard.
-    """
     # TENTATIVE 1 : Mode Recherche (Grounding)
-    try:
-        tools = 'google_search_retrieval'
-        # On spécifie explicitement la version 'models/' pour aider l'API
-        model = genai.GenerativeModel(f'models/{model_name}', tools=tools)
+    prompt_search = f"""
+    Question : {question}
+    Fais une recherche Google récente. Réponds et liste tes sources URL à la fin.
+    """
+    
+    text, used_model = try_generate_content(prompt_search, tools='google_search_retrieval')
+    
+    if text:
+        return text, f"Recherche Web ({used_model}) 🌍"
+    
+    # TENTATIVE 2 : Mode Fallback (Si la recherche plante partout)
+    prompt_standard = f"Tu es un expert. Réponds à cette question : {question}"
+    text_std, used_model_std = try_generate_content(prompt_standard)
+    
+    if text_std:
+        return text_std, f"IA Standard ({used_model_std}) 🤖"
         
-        prompt = f"""
-        Question : {question}
-        Fais une recherche Google récente. Réponds et liste tes sources URL à la fin.
-        """
-        response = model.generate_content(prompt)
-        return response.text, "Recherche Web 🌍"
-        
-    except Exception as e:
-        # TENTATIVE 2 : Mode Fallback (Standard)
-        # Si le mode recherche échoue, on passe ici silencieusement
-        try:
-            model_fallback = genai.GenerativeModel(f'models/{model_name}') # Pas de tools
-            prompt_fallback = f"Tu es un expert. Réponds à cette question : {question}"
-            response = model_fallback.generate_content(prompt_fallback)
-            return response.text, "IA Standard 🤖 (Backup)"
-        except Exception as e2:
-            return f"Erreur critique : {e2}", "Erreur ❌"
+    return f"Erreur Fatale : {used_model_std}", "Échec ❌"
 
 def analyze_content(text, brand):
-    """Extrait les données (JSON)"""
-    model_judge = genai.GenerativeModel(f'models/{model_name}', generation_config={"response_mime_type": "application/json"})
+    # Pour l'analyse JSON, on utilise le modèle Flash standard sans outils
+    model_judge = genai.GenerativeModel("gemini-1.5-flash-latest", generation_config={"response_mime_type": "application/json"})
     
     prompt = f"""
     Analyse ce texte pour la marque "{brand}".
@@ -92,7 +116,8 @@ def analyze_content(text, brand):
         res = model_judge.generate_content(prompt)
         return json.loads(res.text)
     except:
-        return {"cited": False, "sentiment": "Erreur", "sources_detected": "N/A"}
+        # Fallback manuel si le JSON plante
+        return {"cited": False, "sentiment": "Erreur Analyse", "sources_detected": "N/A"}
 
 # --- MAIN LOOP ---
 
@@ -101,7 +126,7 @@ if start_btn:
     results = []
     
     progress_bar = st.progress(0)
-    status_box = st.empty() # Zone de texte dynamique
+    status_box = st.empty()
     
     for i, question in enumerate(questions_list):
         status_box.info(f"Traitement : {question}...")
@@ -110,11 +135,15 @@ if start_btn:
         answer_text, source_mode = get_smart_response(question)
         
         # 2. Analyse
-        data = analyze_content(answer_text, target_brand)
+        # Si l'étape 1 a échoué, on ne lance pas l'analyse
+        if "Échec" in source_mode:
+            data = {"cited": False, "sentiment": "N/A", "sources_detected": "N/A"}
+        else:
+            data = analyze_content(answer_text, target_brand)
         
         row = {
             "Question": question,
-            "Mode": source_mode, # On affiche si on a réussi à utiliser Google ou non
+            "Mode": source_mode,
             "Présence": "✅" if data.get('cited') else "❌",
             "Sources": data.get('sources_detected', 'N/A'),
             "Réponse": answer_text
