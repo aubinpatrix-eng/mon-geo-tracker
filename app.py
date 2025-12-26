@@ -4,11 +4,12 @@ import pandas as pd
 import json
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="GEO Tracker (Gemini 2.5)", layout="wide")
+st.set_page_config(page_title="GEO Tracker (Final)", layout="wide")
 
-st.title("🚀 GEO Analytics (Version Gemini 2.5)")
+st.title("🌍 GEO Analytics (Mode Sources Réelles)")
 st.markdown("""
-**Moteur :** Ce script utilise la version **Gemini 2.5** détectée sur ton compte.
+**État :** Connecté.
+**Objectif :** Forcer l'affichage des URLs sources et du texte complet.
 """)
 
 # --- SIDEBAR ---
@@ -16,26 +17,11 @@ with st.sidebar:
     st.header("Paramètres")
     api_key = st.text_input("Ta clé API Google (AI Studio)", type="password")
     
-    # LISTE MISE À JOUR SELON TA CAPTURE D'ÉCRAN
-    available_models = [
-        "gemini-2.5-flash",    # LE NOUVEAU (Prioritaire)
-        "gemini-2.5-pro",      # Le plus puissant
-        "gemini-2.0-flash",    # Backup
-        "gemini-1.5-flash"     # Ancien standard
-    ]
+    # On utilise le modèle 2.0 Flash qui est très fiable pour le Search
+    # (Le 2.5 est parfois capricieux avec les outils pour l'instant)
+    search_model = "gemini-2.0-flash" 
     
-    st.caption("Modèle cible : gemini-2.5-flash")
-
-    # DIAGNOSTIC RAPIDE
-    if st.button("Re-vérifier ma connexion"):
-        if api_key:
-            try:
-                genai.configure(api_key=api_key)
-                models = genai.list_models()
-                found = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
-                st.success(f"Connecté ! {len(found)} modèles trouvés.")
-            except Exception as e:
-                st.error(f"Erreur : {e}")
+    st.info(f"Moteur de recherche actif : {search_model}")
 
 if api_key:
     genai.configure(api_key=api_key)
@@ -59,43 +45,60 @@ start_btn = st.button("Lancer l'Audit", type="primary")
 
 # --- FONCTIONS CORE ---
 
-def get_smart_response(question):
-    """Essaie de répondre avec Gemini 2.5, avec ou sans recherche"""
-    
-    # On boucle pour trouver le bon modèle
-    for model_name in available_models:
+def get_web_response(question):
+    """
+    Force la recherche Google avec le modèle 2.0 Flash
+    """
+    try:
+        # Configuration spécifique pour activer le Grounding (Recherche)
+        tools = 'google_search_retrieval'
+        model = genai.GenerativeModel(search_model, tools=tools)
+        
+        prompt = f"""
+        Tu es un analyste de marché.
+        Question : {question}
+        
+        Consignes STRICTES :
+        1. Utilise l'outil Google Search pour trouver des réponses ACTUELLES.
+        2. Cite explicitement les URLs des sites que tu as consultés dans le texte.
+        3. Réponds de manière détaillée.
+        """
+        
+        response = model.generate_content(prompt)
+        
+        # Vérification si des sources sont attachées aux métadonnées (le vrai Grounding)
         try:
-            # 1. TENTATIVE AVEC RECHERCHE (Grounding)
-            try:
-                model = genai.GenerativeModel(model_name, tools='google_search_retrieval')
-                prompt = f"Question: {question}. Fais une recherche Google récente. Réponds et liste tes sources URL à la fin."
-                response = model.generate_content(prompt)
-                return response.text, f"Recherche Web ({model_name}) 🌍"
-            except:
-                # Si la recherche échoue, on continue sans planter
-                pass
-
-            # 2. TENTATIVE STANDARD (Sans recherche)
-            model_std = genai.GenerativeModel(model_name)
-            response_std = model_std.generate_content(question)
-            return response_std.text, f"IA Standard ({model_name}) 🤖"
+            sources = response.candidates[0].grounding_metadata.search_entry_point.rendered_content
+        except:
+            sources = None
             
-        except Exception:
-            continue # On passe au modèle suivant si celui-ci plante (404)
-            
-    return "Aucun modèle n'a fonctionné.", "Erreur ❌"
+        return response.text, "Recherche Web 🌍 (Activée)"
+    except Exception as e:
+        # Fallback si le Search plante
+        return f"Erreur Search: {str(e)}", "Erreur ❌"
 
 def analyze_content(text, brand):
-    # Analyse JSON
-    judge_model = "gemini-2.5-flash" # On utilise le plus rapide
+    # Analyseur JSON
     try:
-        model = genai.GenerativeModel(judge_model, generation_config={"response_mime_type": "application/json"})
-        prompt = f"""Analyse ce texte pour la marque "{brand}". Réponds JSON : {{"cited": boolean, "sentiment": string, "sources": string}} Texte : \"\"\"{text}\"\"\""""
+        model = genai.GenerativeModel("gemini-2.0-flash", generation_config={"response_mime_type": "application/json"})
+        prompt = f"""
+        Analyse ce texte.
+        Marque cible : "{brand}"
+        
+        Extrais les domaines (ex: runnersworld.com) cités dans le texte.
+        
+        Réponds JSON :
+        {{
+            "cited": boolean, 
+            "sentiment": string, 
+            "sources_urls": list of strings (Liste les domaines trouvés dans le texte)
+        }}
+        Texte : \"\"\"{text}\"\"\"
+        """
         res = model.generate_content(prompt)
         return json.loads(res.text)
     except:
-        # Fallback si le 2.5 plante, on tente le 1.5 ou on renvoie une erreur soft
-        return {"cited": False, "sentiment": "Erreur Analyse", "sources": "N/A"}
+        return {"cited": False, "sentiment": "N/A", "sources_urls": []}
 
 # --- MAIN LOOP ---
 
@@ -104,29 +107,51 @@ if start_btn:
     results = []
     
     progress_bar = st.progress(0)
-    status_box = st.empty()
     
     for i, question in enumerate(questions_list):
-        status_box.info(f"Traitement : {question}...")
         
-        answer_text, source_mode = get_smart_response(question)
+        # 1. Appel Web
+        answer_text, mode = get_web_response(question)
         
-        if "Erreur" in source_mode:
-            data = {"cited": False, "sentiment": "N/A", "sources": "N/A"}
-        else:
+        # 2. Extraction Data
+        if "Erreur" not in mode:
             data = analyze_content(answer_text, target_brand)
-        
+        else:
+            data = {"cited": False, "sources_urls": [], "sentiment": "Error"}
+            # On utilise le texte d'erreur comme réponse pour debug
+            answer_text = mode 
+
+        # Nettoyage des sources
+        sources_str = ", ".join(data.get('sources_urls', []))
+        if not sources_str:
+            sources_str = "Aucune source détectée"
+
         results.append({
             "Question": question,
-            "Mode": source_mode,
+            "Mode": mode,
             "Présence": "✅" if data.get('cited') else "❌",
-            "Sources": data.get('sources', 'N/A'),
-            "Réponse": answer_text
+            "Sources Détectées": sources_str,
+            "Réponse Complète": answer_text # On garde le texte entier
         })
         progress_bar.progress((i + 1) / len(questions_list))
 
-    status_box.success("Terminé !")
+    # --- AFFICHAGE ---
+    st.success("Audit terminé !")
     
     if results:
         df = pd.DataFrame(results)
-        st.dataframe(df[["Question", "Mode", "Présence", "Sources"]], use_container_width=True)
+        
+        # Tableau principal
+        st.dataframe(
+            df[["Question", "Mode", "Présence", "Sources Détectées"]], 
+            use_container_width=True
+        )
+        
+        st.divider()
+        st.subheader("📖 Lecture des Réponses Complètes")
+        
+        # BOUCLE D'AFFICHAGE DU TEXTE
+        for index, row in df.iterrows():
+            with st.expander(f"Q: {row['Question']} (Voir le texte généré)"):
+                st.markdown(f"**Sources trouvées :** {row['Sources Détectées']}")
+                st.info(row['Réponse Complète']) # Affiche tout le texte ici
