@@ -2,31 +2,50 @@ import streamlit as st
 import google.generativeai as genai
 import pandas as pd
 import json
-import time
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="GEO Tracker (Mode Auto-Fix)", layout="wide")
+st.set_page_config(page_title="GEO Tracker (Gemini 2.0)", layout="wide")
 
-st.title("🔧 GEO Analytics Tracker (Mode Auto-Fix)")
+st.title("🚀 GEO Analytics (Version Gemini 2.0 Flash)")
 st.markdown("""
-**Statut :** Ce script teste automatiquement plusieurs versions de Gemini pour contourner les erreurs 404.
+**Moteur :** Ce script force l'utilisation des derniers modèles expérimentaux de Google.
+Si le mode "Recherche" échoue, il bascule automatiquement sur l'analyse standard.
 """)
 
-# --- SIDEBAR ---
+# --- SIDEBAR & DIAGNOSTIC ---
 with st.sidebar:
     st.header("Paramètres")
     api_key = st.text_input("Ta clé API Google (AI Studio)", type="password")
     
-   # LISTE DE SECOURS (Mise à jour avec Gemini 3 Flash ?)
+    # LISTE PRIORITAIRE (Incluant le "3 Flash" qui est en fait le 2.0 Exp)
     available_models = [
-        "gemini-2.0-flash-exp",     # Le plus probable pour "Fast/Flash récent"
-        "gemini-exp-1206",          # Un autre nom de code récent très rapide
-        "gemini-1.5-flash",         # La valeur sûre
-        "gemini-1.5-flash-8b",      # Une version ultra-légère parfois dispo
-        "gemini-1.5-pro"            # Le backup puissant
+        "gemini-2.0-flash-exp",     # Le fameux nouveau modèle
+        "gemini-exp-1206",          # Version expérimentale alternative
+        "gemini-1.5-flash",         # Standard
+        "gemini-1.5-flash-8b",      # Version légère
+        "gemini-1.5-pro"            # Version Pro
     ]
     
-    st.caption(f"Modèles qui seront testés : {', '.join(available_models)}")
+    st.caption("Modèles testés : " + ", ".join(available_models))
+
+    st.divider()
+    
+    # BOUTON DE DEBUG (Pour comprendre l'erreur 404)
+    if st.button("🆘 Vérifier ma connexion API"):
+        if api_key:
+            try:
+                genai.configure(api_key=api_key)
+                models = genai.list_models()
+                found = []
+                for m in models:
+                    if 'generateContent' in m.supported_generation_methods:
+                        found.append(m.name)
+                st.success(f"Connexion réussie ! Modèles accessibles ({len(found)}) :")
+                st.code("\n".join(found))
+            except Exception as e:
+                st.error(f"Erreur de connexion : {e}")
+        else:
+            st.warning("Entre d'abord ta clé API.")
 
 if api_key:
     genai.configure(api_key=api_key)
@@ -48,77 +67,61 @@ input_questions = st.text_area(
 
 start_btn = st.button("Lancer l'Audit", type="primary")
 
-# --- FONCTIONS INTELLIGENTES (AVEC ROTATION DE MODÈLES) ---
+# --- FONCTIONS INTELLIGENTES ---
 
 def try_generate_content(prompt, tools=None):
-    """
-    Cette fonction essaie tous les modèles de la liste jusqu'à ce qu'un fonctionne.
-    """
+    """Teste les modèles un par un jusqu'à ce que ça marche"""
     last_error = ""
     
     for model_name in available_models:
         try:
-            # On tente de configurer le modèle
+            # On instancie le modèle
             if tools:
                 model = genai.GenerativeModel(model_name, tools=tools)
             else:
                 model = genai.GenerativeModel(model_name)
-                
-            # On lance la génération
+            
+            # On tente la génération
             response = model.generate_content(prompt)
             
-            # Si on arrive ici, c'est que ça a marché !
+            # Vérification de sécurité (si Google bloque la réponse)
+            if not response.text:
+                return None, f"Bloqué par sécu ({model_name})"
+                
             return response.text, model_name 
             
         except Exception as e:
-            # Si ça plante, on note l'erreur et on passe au modèle suivant dans la boucle
             last_error = str(e)
-            continue
+            continue # On passe au modèle suivant
             
-    # Si tout a échoué
     return None, last_error
 
 def get_smart_response(question):
-    # TENTATIVE 1 : Mode Recherche (Grounding)
-    prompt_search = f"""
-    Question : {question}
-    Fais une recherche Google récente. Réponds et liste tes sources URL à la fin.
-    """
-    
-    text, used_model = try_generate_content(prompt_search, tools='google_search_retrieval')
+    # 1. ESSAI AVEC RECHERCHE (Grounding)
+    prompt_search = f"Question: {question}. Fais une recherche Google et réponds en citant les URLs sources."
+    text, model = try_generate_content(prompt_search, tools='google_search_retrieval')
     
     if text:
-        return text, f"Recherche Web ({used_model}) 🌍"
+        return text, f"Recherche Web ({model}) 🌍"
     
-    # TENTATIVE 2 : Mode Fallback (Si la recherche plante partout)
-    prompt_standard = f"Tu es un expert. Réponds à cette question : {question}"
-    text_std, used_model_std = try_generate_content(prompt_standard)
+    # 2. ESSAI CLASSIQUE (Si la recherche échoue)
+    prompt_std = f"Réponds à cette question : {question}"
+    text_std, model_std = try_generate_content(prompt_std)
     
     if text_std:
-        return text_std, f"IA Standard ({used_model_std}) 🤖"
+        return text_std, f"IA Standard ({model_std}) 🤖"
         
-    return f"Erreur Fatale : {used_model_std}", "Échec ❌"
+    return f"Erreur : {model_std}", "Échec Total ❌"
 
 def analyze_content(text, brand):
-    # Pour l'analyse JSON, on utilise le modèle Flash standard sans outils
-    model_judge = genai.GenerativeModel("gemini-1.5-flash-latest", generation_config={"response_mime_type": "application/json"})
-    
-    prompt = f"""
-    Analyse ce texte pour la marque "{brand}".
-    Réponds en JSON :
-    {{
-        "cited": boolean,
-        "sentiment": string,
-        "sources_detected": string (Liste les domaines ou 'Aucune source' si absent)
-    }}
-    Texte : \"\"\"{text}\"\"\"
-    """
+    # Analyseur simple en JSON
+    model_judge = genai.GenerativeModel("gemini-1.5-flash", generation_config={"response_mime_type": "application/json"})
+    prompt = f"""Analyse ce texte pour la marque "{brand}". Réponds en JSON : {{"cited": boolean, "sentiment": string, "sources": string}} Texte : \"\"\"{text}\"\"\""""
     try:
         res = model_judge.generate_content(prompt)
         return json.loads(res.text)
     except:
-        # Fallback manuel si le JSON plante
-        return {"cited": False, "sentiment": "Erreur Analyse", "sources_detected": "N/A"}
+        return {"cited": False, "sentiment": "Erreur", "sources": "N/A"}
 
 # --- MAIN LOOP ---
 
@@ -132,33 +135,24 @@ if start_btn:
     for i, question in enumerate(questions_list):
         status_box.info(f"Traitement : {question}...")
         
-        # 1. Récupération intelligente
         answer_text, source_mode = get_smart_response(question)
         
-        # 2. Analyse
-        # Si l'étape 1 a échoué, on ne lance pas l'analyse
         if "Échec" in source_mode:
-            data = {"cited": False, "sentiment": "N/A", "sources_detected": "N/A"}
+            data = {"cited": False, "sentiment": "N/A", "sources": "N/A"}
         else:
             data = analyze_content(answer_text, target_brand)
         
-        row = {
+        results.append({
             "Question": question,
             "Mode": source_mode,
             "Présence": "✅" if data.get('cited') else "❌",
-            "Sources": data.get('sources_detected', 'N/A'),
+            "Sources": data.get('sources', 'N/A'),
             "Réponse": answer_text
-        }
-        results.append(row)
+        })
         progress_bar.progress((i + 1) / len(questions_list))
 
     status_box.success("Terminé !")
-
-    # --- RESULTS ---
-    st.divider()
+    
     if results:
         df = pd.DataFrame(results)
         st.dataframe(df[["Question", "Mode", "Présence", "Sources"]], use_container_width=True)
-        
-        with st.expander("Voir les détails"):
-            st.table(df)
